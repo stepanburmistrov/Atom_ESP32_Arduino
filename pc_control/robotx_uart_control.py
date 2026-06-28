@@ -4,12 +4,13 @@
 RobotX UART Control Panel
 =========================
 
-Пульт для отладки робота напрямую с компьютера до подключения ESP32.
+Красивый пульт для отладки робота напрямую с компьютера до подключения ESP32.
 
 Что делает:
 - открывает COM-порт Arduino Nano;
 - отправляет те же UART-команды, что и ESP32 Wi-Fi модуль;
-- позволяет управлять мышью по кнопкам и клавиатурой.
+- позволяет управлять мышью по большим экранным кнопкам;
+- позволяет управлять клавиатурой.
 
 Протокол:
 F/B/L/R/S — движение;
@@ -25,56 +26,168 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dataclasses import dataclass
-from typing import Optional, Dict, Callable, Set
+from typing import Dict, Optional, Set
 
 try:
     import serial
     from serial.tools import list_ports
-except ImportError:  # pyserial is optional until user connects
+except ImportError:
     serial = None
     list_ports = None
 
 
 BAUD_DEFAULT = 9600
+APP_VERSION = "2.1"
 
 # Коды команд должны совпадать с Arduino Nano и ESP32 Web UI.
-MOVE_COMMANDS = {
-    "forward": "F",
-    "back": "B",
+KEY_PRESS_COMMANDS = {
+    "up": "F",
+    "down": "B",
     "left": "L",
     "right": "R",
-    "stop": "S",
+    "space": "S",
+    "q": "Q",
+    "a": "A",
+    "w": "W",
+    "d": "D",
 }
 
-SERVO_COMMANDS = {
-    "left_up_press": "Q",
-    "left_up_release": "q",
-    "left_down_press": "A",
-    "left_down_release": "a",
-    "right_up_press": "W",
-    "right_up_release": "w",
-    "right_down_press": "D",
-    "right_down_release": "d",
+KEY_RELEASE_COMMANDS = {
+    "up": "S",
+    "down": "S",
+    "left": "S",
+    "right": "S",
+    "space": "S",
+    "q": "q",
+    "a": "a",
+    "w": "w",
+    "d": "d",
 }
 
 
-@dataclass
-class ButtonSpec:
+@dataclass(frozen=True)
+class HoldButtonSpec:
+    code: str
     title: str
+    subtitle: str
     press_cmd: str
     release_cmd: str
     row: int
     col: int
-    style: str
-    width: int = 11
+    kind: str
+    width: int = 178
+    height: int = 104
+
+
+class HoldButton(tk.Frame):
+    """Большая кнопка с аккуратной вёрсткой текста.
+
+    Обычный ttk.Button на Windows часто обрезает многострочный русский текст.
+    Поэтому здесь используется Frame + Label с фиксированной высотой и шириной:
+    текст не обрезается, а вся кнопка работает как удерживаемая.
+    """
+
+    COLORS = {
+        "servo": {"bg": "#f39c12", "active": "#d88a0f", "shadow": "#8a5600", "fg": "#ffffff"},
+        "drive": {"bg": "#2d8cff", "active": "#2472d0", "shadow": "#154f97", "fg": "#ffffff"},
+        "stop": {"bg": "#e74c3c", "active": "#c0392b", "shadow": "#7f1d17", "fg": "#ffffff"},
+    }
+
+    def __init__(self, master: tk.Misc, app: "RobotXControlApp", spec: HoldButtonSpec) -> None:
+        self.spec = spec
+        self.app = app
+        self.palette = self.COLORS[spec.kind]
+        super().__init__(master, width=spec.width, height=spec.height + 7, bg=self.palette["shadow"])
+        self.grid_propagate(False)
+        self.pack_propagate(False)
+
+        self.face = tk.Frame(self, bg=self.palette["bg"], width=spec.width, height=spec.height)
+        self.face.place(x=0, y=0, width=spec.width, height=spec.height)
+        self.face.pack_propagate(False)
+
+        # Для STOP не нужен отдельный крупный код сверху.
+        if spec.code == "STOP":
+            code_text = "STOP"
+            title_text = spec.title
+            code_font = ("Segoe UI", 20, "bold")
+            title_font = ("Segoe UI", 10, "bold")
+        else:
+            code_text = spec.code
+            title_text = spec.title
+            code_font = ("Segoe UI", 21, "bold")
+            title_font = ("Segoe UI", 11, "bold")
+
+        self.code_label = tk.Label(
+            self.face,
+            text=code_text,
+            bg=self.palette["bg"],
+            fg=self.palette["fg"],
+            font=code_font,
+        )
+        self.code_label.place(relx=0.5, rely=0.23, anchor="center")
+
+        self.title_label = tk.Label(
+            self.face,
+            text=title_text,
+            bg=self.palette["bg"],
+            fg=self.palette["fg"],
+            font=title_font,
+            justify="center",
+            wraplength=spec.width - 14,
+        )
+        self.title_label.place(relx=0.5, rely=0.56, anchor="center")
+
+        self.subtitle_label = tk.Label(
+            self.face,
+            text=spec.subtitle,
+            bg=self.palette["bg"],
+            fg="#fff7df" if spec.kind == "servo" else "#dcecff",
+            font=("Segoe UI", 8, "bold"),
+            justify="center",
+            wraplength=spec.width - 14,
+        )
+        self.subtitle_label.place(relx=0.5, rely=0.82, anchor="center")
+
+        self._bind_all_children("<ButtonPress-1>", self._on_press)
+        self._bind_all_children("<ButtonRelease-1>", self._on_release)
+        self._bind_all_children("<Leave>", self._on_leave)
+
+    def _bind_all_children(self, sequence: str, callback) -> None:
+        widgets = [self, self.face, self.code_label, self.title_label, self.subtitle_label]
+        for widget in widgets:
+            widget.bind(sequence, callback)
+
+    def _on_press(self, event: tk.Event) -> None:
+        self.face.configure(bg=self.palette["active"])
+        for widget in (self.code_label, self.title_label, self.subtitle_label):
+            widget.configure(bg=self.palette["active"])
+        self.face.place_configure(y=5)
+        self.app.send_command(self.spec.press_cmd)
+
+    def _on_release(self, event: tk.Event) -> None:
+        self._release_visual()
+        self.app.send_command(self.spec.release_cmd)
+
+    def _on_leave(self, event: tk.Event) -> None:
+        # Если кнопку удерживали мышью и увели курсор — лучше остановить действие.
+        if event.state & 0x0100:
+            self._release_visual()
+            self.app.send_command(self.spec.release_cmd)
+
+    def _release_visual(self) -> None:
+        self.face.configure(bg=self.palette["bg"])
+        for widget in (self.code_label, self.title_label, self.subtitle_label):
+            widget.configure(bg=self.palette["bg"])
+        self.face.place_configure(y=0)
 
 
 class RobotXControlApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("RobotX UART Control")
-        self.geometry("980x620")
-        self.minsize(900, 560)
+        self.geometry("1080x680")
+        self.minsize(1000, 640)
+        self.configure(bg="#0f1016")
 
         self.serial_port: Optional["serial.Serial"] = None
         self.last_cmd = "S"
@@ -97,108 +210,161 @@ class RobotXControlApp(tk.Tk):
         except tk.TclError:
             pass
 
-        style.configure("TFrame", background="#101014")
-        style.configure("Panel.TFrame", background="#181820", relief="flat")
-        style.configure("TLabel", background="#101014", foreground="#f2f2f2", font=("Arial", 11))
-        style.configure("Title.TLabel", background="#101014", foreground="#ffffff", font=("Arial", 20, "bold"))
-        style.configure("Status.TLabel", background="#101014", foreground="#f39c12", font=("Arial", 14, "bold"))
-        style.configure("Hint.TLabel", background="#101014", foreground="#aaaaaa", font=("Arial", 10))
-        style.configure("Robot.TButton", font=("Arial", 16, "bold"), padding=14)
-        style.configure("Stop.TButton", font=("Arial", 16, "bold"), padding=14)
-        style.configure("Servo.TButton", font=("Arial", 16, "bold"), padding=14)
+        style.configure("Dark.TFrame", background="#0f1016")
+        style.configure("Panel.TFrame", background="#181923")
+        style.configure("Card.TFrame", background="#12131a")
+        style.configure("TLabel", background="#0f1016", foreground="#f5f5f5", font=("Segoe UI", 11))
+        style.configure("Title.TLabel", background="#0f1016", foreground="#ffffff", font=("Segoe UI", 22, "bold"))
+        style.configure("PanelTitle.TLabel", background="#181923", foreground="#ffffff", font=("Segoe UI", 20, "bold"))
+        style.configure("Hint.TLabel", background="#0f1016", foreground="#b7bcc8", font=("Segoe UI", 10))
+        style.configure("Status.TLabel", background="#0f1016", foreground="#f39c12", font=("Segoe UI", 18, "bold"))
+        style.configure("Small.TButton", font=("Segoe UI", 10), padding=(10, 6))
+        style.configure("Connect.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 6))
 
     def _build_ui(self) -> None:
-        self.configure(bg="#101014")
-        root = ttk.Frame(self, padding=16)
+        root = ttk.Frame(self, style="Dark.TFrame", padding=18)
         root.pack(fill="both", expand=True)
 
-        header = ttk.Frame(root)
-        header.pack(fill="x", pady=(0, 12))
+        header = ttk.Frame(root, style="Dark.TFrame")
+        header.pack(fill="x", pady=(0, 14))
 
-        ttk.Label(header, text="RobotX UART Control", style="Title.TLabel").pack(side="left")
-        self.status_label = ttk.Label(header, text="Последняя команда: S", style="Status.TLabel")
-        self.status_label.pack(side="right")
+        title_block = ttk.Frame(header, style="Dark.TFrame")
+        title_block.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_block, text="RobotX UART Control", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            title_block,
+            text="Отладочный пульт: компьютер → USB-UART → Arduino Nano → робот",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
 
-        connection = ttk.Frame(root, style="Panel.TFrame", padding=12)
+        self.status_label = ttk.Label(header, text="Команда: S", style="Status.TLabel")
+        self.status_label.pack(side="right", padx=(16, 0))
+
+        connection = ttk.Frame(root, style="Panel.TFrame", padding=14)
         connection.pack(fill="x", pady=(0, 14))
 
-        ttk.Label(connection, text="COM-порт:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.port_combo = ttk.Combobox(connection, width=32, state="readonly")
-        self.port_combo.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        for col in range(8):
+            connection.grid_columnconfigure(col, weight=0)
+        connection.grid_columnconfigure(1, weight=1)
+        connection.grid_columnconfigure(7, weight=1)
 
-        ttk.Button(connection, text="Обновить", command=self.refresh_ports).grid(row=0, column=2, padx=4)
+        tk.Label(connection, text="COM-порт", bg="#181923", fg="#ffffff", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        self.port_combo = ttk.Combobox(connection, width=42, state="readonly")
+        self.port_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
 
-        ttk.Label(connection, text="Скорость:").grid(row=0, column=3, sticky="w", padx=(20, 8))
+        ttk.Button(connection, text="Обновить", style="Small.TButton", command=self.refresh_ports).grid(row=0, column=2, padx=(0, 14))
+
+        tk.Label(connection, text="Скорость", bg="#181923", fg="#ffffff", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=3, sticky="w", padx=(0, 8)
+        )
         self.baud_var = tk.StringVar(value=str(BAUD_DEFAULT))
-        ttk.Entry(connection, textvariable=self.baud_var, width=10).grid(row=0, column=4, sticky="w")
+        ttk.Entry(connection, textvariable=self.baud_var, width=9).grid(row=0, column=4, sticky="w", padx=(0, 14))
 
-        self.connect_btn = ttk.Button(connection, text="Подключиться", command=self.toggle_connection)
-        self.connect_btn.grid(row=0, column=5, padx=(16, 4))
+        self.connect_btn = ttk.Button(connection, text="Подключиться", style="Connect.TButton", command=self.toggle_connection)
+        self.connect_btn.grid(row=0, column=5, sticky="w", padx=(0, 12))
 
-        self.connection_label = ttk.Label(connection, text="Не подключено", style="Hint.TLabel")
-        self.connection_label.grid(row=0, column=6, padx=(12, 0), sticky="w")
+        self.connection_badge = tk.Label(
+            connection,
+            text="● Не подключено",
+            bg="#20212c",
+            fg="#ff7675",
+            font=("Segoe UI", 10, "bold"),
+            padx=12,
+            pady=7,
+        )
+        self.connection_badge.grid(row=0, column=6, sticky="w")
 
-        main = ttk.Frame(root)
+        main = ttk.Frame(root, style="Dark.TFrame")
         main.pack(fill="both", expand=True)
+        main.grid_columnconfigure(0, weight=1, uniform="main")
+        main.grid_columnconfigure(1, weight=1, uniform="main")
+        main.grid_rowconfigure(0, weight=1)
 
-        servo_frame = ttk.Frame(main, style="Panel.TFrame", padding=18)
-        servo_frame.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        drive_frame = ttk.Frame(main, style="Panel.TFrame", padding=18)
-        drive_frame.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        servo_panel = ttk.Frame(main, style="Panel.TFrame", padding=20)
+        servo_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        drive_panel = ttk.Frame(main, style="Panel.TFrame", padding=20)
+        drive_panel.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
 
-        ttk.Label(servo_frame, text="Сервоприводы", style="Title.TLabel").pack(anchor="center", pady=(0, 10))
-        servo_grid = ttk.Frame(servo_frame, style="Panel.TFrame")
-        servo_grid.pack(expand=True)
+        self._build_servo_panel(servo_panel)
+        self._build_drive_panel(drive_panel)
 
-        servo_specs = [
-            ButtonSpec("Q\nЛевый вверх", "Q", "q", 0, 0, "Servo.TButton"),
-            ButtonSpec("W\nПравый вверх", "W", "w", 0, 1, "Servo.TButton"),
-            ButtonSpec("A\nЛевый вниз", "A", "a", 1, 0, "Servo.TButton"),
-            ButtonSpec("D\nПравый вниз", "D", "d", 1, 1, "Servo.TButton"),
-        ]
-        for spec in servo_specs:
-            self._make_hold_button(servo_grid, spec)
-
-        ttk.Label(drive_frame, text="Движение", style="Title.TLabel").pack(anchor="center", pady=(0, 10))
-        drive_grid = ttk.Frame(drive_frame, style="Panel.TFrame")
-        drive_grid.pack(expand=True)
-
-        drive_specs = [
-            ButtonSpec("▲\nВперёд", "F", "S", 0, 1, "Robot.TButton"),
-            ButtonSpec("◀\nВлево", "L", "S", 1, 0, "Robot.TButton"),
-            ButtonSpec("STOP", "S", "S", 1, 1, "Stop.TButton"),
-            ButtonSpec("▶\nВправо", "R", "S", 1, 2, "Robot.TButton"),
-            ButtonSpec("▼\nНазад", "B", "S", 2, 1, "Robot.TButton"),
-        ]
-        for spec in drive_specs:
-            self._make_hold_button(drive_grid, spec)
-
-        bottom = ttk.Frame(root, padding=(0, 12, 0, 0))
-        bottom.pack(fill="both")
+        bottom = ttk.Frame(root, style="Dark.TFrame", padding=(0, 12, 0, 0))
+        bottom.pack(fill="x")
 
         ttk.Label(
             bottom,
-            text="Клавиатура: стрелки — движение, Space — стоп, Q/A — левая серва, W/D — правая серва. "
-                 "Мышью кнопки работают как удерживаемые.",
+            text="Клавиатура: стрелки — движение • Space — стоп • Q/A — левая серва • W/D — правая серва. "
+                 "Кнопки серв удерживаются, отпускание отправляет стоп-команду.",
             style="Hint.TLabel",
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(0, 8))
 
-        self.log_text = tk.Text(bottom, height=7, bg="#0b0b0f", fg="#eeeeee", insertbackground="#ffffff")
-        self.log_text.pack(fill="both", expand=True, pady=(8, 0))
+        log_wrap = tk.Frame(bottom, bg="#2c2f3a", padx=1, pady=1)
+        log_wrap.pack(fill="x")
+        self.log_text = tk.Text(
+            log_wrap,
+            height=4,
+            bg="#090a0f",
+            fg="#e8e8e8",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=("Consolas", 10),
+            padx=10,
+            pady=8,
+        )
+        self.log_text.pack(fill="x")
+
         self.log("Готово. Выберите COM-порт Arduino Nano и нажмите 'Подключиться'.")
         if serial is None:
             self.log("pyserial не установлен. Установите: pip install pyserial")
 
-    def _make_hold_button(self, parent: ttk.Frame, spec: ButtonSpec) -> None:
-        btn = ttk.Button(parent, text=spec.title, style=spec.style, width=spec.width)
-        btn.grid(row=spec.row, column=spec.col, padx=10, pady=10, sticky="nsew")
-        btn.bind("<ButtonPress-1>", lambda event, cmd=spec.press_cmd: self.send_command(cmd))
-        btn.bind("<ButtonRelease-1>", lambda event, cmd=spec.release_cmd: self.send_command(cmd))
+    def _build_servo_panel(self, panel: ttk.Frame) -> None:
+        ttk.Label(panel, text="Сервоприводы", style="PanelTitle.TLabel").pack(anchor="center", pady=(0, 4))
+        tk.Label(
+            panel,
+            text="Q/A — левая серва, W/D — правая серва",
+            bg="#181923",
+            fg="#b7bcc8",
+            font=("Segoe UI", 10),
+        ).pack(anchor="center", pady=(0, 18))
 
-        for i in range(3):
-            parent.grid_columnconfigure(i, weight=1, minsize=130)
-        for i in range(3):
-            parent.grid_rowconfigure(i, weight=1, minsize=90)
+        grid = tk.Frame(panel, bg="#181923")
+        grid.pack(expand=True)
+
+        specs = [
+            HoldButtonSpec("Q", "Левая серва вверх", "удерживать", "Q", "q", 0, 0, "servo", 190, 108),
+            HoldButtonSpec("W", "Правая серва вверх", "удерживать", "W", "w", 0, 1, "servo", 190, 108),
+            HoldButtonSpec("A", "Левая серва вниз", "удерживать", "A", "a", 1, 0, "servo", 190, 108),
+            HoldButtonSpec("D", "Правая серва вниз", "удерживать", "D", "d", 1, 1, "servo", 190, 108),
+        ]
+        for spec in specs:
+            btn = HoldButton(grid, self, spec)
+            btn.grid(row=spec.row, column=spec.col, padx=14, pady=12)
+
+    def _build_drive_panel(self, panel: ttk.Frame) -> None:
+        ttk.Label(panel, text="Движение", style="PanelTitle.TLabel").pack(anchor="center", pady=(0, 4))
+        tk.Label(
+            panel,
+            text="Стрелки на клавиатуре или кнопки мышью",
+            bg="#181923",
+            fg="#b7bcc8",
+            font=("Segoe UI", 10),
+        ).pack(anchor="center", pady=(0, 18))
+
+        grid = tk.Frame(panel, bg="#181923")
+        grid.pack(expand=True)
+
+        specs = [
+            HoldButtonSpec("▲", "Вперёд", "F", "F", "S", 0, 1, "drive", 150, 94),
+            HoldButtonSpec("◀", "Влево", "L", "L", "S", 1, 0, "drive", 150, 94),
+            HoldButtonSpec("STOP", "Остановить", "Space / S", "S", "S", 1, 1, "stop", 150, 94),
+            HoldButtonSpec("▶", "Вправо", "R", "R", "S", 1, 2, "drive", 150, 94),
+            HoldButtonSpec("▼", "Назад", "B", "B", "S", 2, 1, "drive", 150, 94),
+        ]
+        for spec in specs:
+            btn = HoldButton(grid, self, spec)
+            btn.grid(row=spec.row, column=spec.col, padx=9, pady=8)
 
     # ---------- serial ----------
 
@@ -245,7 +411,7 @@ class RobotXControlApp(tk.Tk):
             self.serial_port = serial.Serial(port=port, baudrate=baud, timeout=0.05, write_timeout=0.5)
             time.sleep(1.8)  # Arduino Nano может перезагрузиться при открытии порта
             self.connect_btn.config(text="Отключиться")
-            self.connection_label.config(text=f"Подключено: {port} @ {baud}")
+            self.connection_badge.config(text=f"● Подключено: {port} @ {baud}", fg="#55efc4")
             self.log(f"Подключено к {port} на {baud} бод.")
             self.send_command("S")
         except Exception as exc:
@@ -261,7 +427,7 @@ class RobotXControlApp(tk.Tk):
         finally:
             self.serial_port = None
             self.connect_btn.config(text="Подключиться")
-            self.connection_label.config(text="Не подключено")
+            self.connection_badge.config(text="● Не подключено", fg="#ff7675")
             self.log("Отключено.")
 
     def send_command(self, cmd: str) -> None:
@@ -270,7 +436,7 @@ class RobotXControlApp(tk.Tk):
             return
 
         self.last_cmd = cmd
-        self.status_label.config(text=f"Последняя команда: {cmd}")
+        self.status_label.config(text=f"Команда: {cmd}")
 
         line = (cmd + "\n").encode("ascii")
         if self.serial_port and self.serial_port.is_open:
@@ -296,18 +462,7 @@ class RobotXControlApp(tk.Tk):
             return
         self.pressed_keys.add(key)
 
-        mapping = {
-            "up": "F",
-            "down": "B",
-            "left": "L",
-            "right": "R",
-            "space": "S",
-            "q": "Q",
-            "a": "A",
-            "w": "W",
-            "d": "D",
-        }
-        cmd = mapping.get(key)
+        cmd = KEY_PRESS_COMMANDS.get(key)
         if cmd:
             self.send_command(cmd)
 
@@ -315,18 +470,7 @@ class RobotXControlApp(tk.Tk):
         key = event.keysym.lower()
         self.pressed_keys.discard(key)
 
-        release_mapping = {
-            "up": "S",
-            "down": "S",
-            "left": "S",
-            "right": "S",
-            "space": "S",
-            "q": "q",
-            "a": "a",
-            "w": "w",
-            "d": "d",
-        }
-        cmd = release_mapping.get(key)
+        cmd = KEY_RELEASE_COMMANDS.get(key)
         if cmd:
             self.send_command(cmd)
 
