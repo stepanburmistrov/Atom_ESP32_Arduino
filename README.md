@@ -64,8 +64,19 @@ RobotX_UART_WiFi_Robot/
 │   └── debug_pc_control.md
 ├── configs/
 │   └── atom_network_presets.txt
+├── stl/
+│   └── *.stl
 └── images/
 ```
+
+
+## STL детали для 3D-печати
+
+В папке `stl/` лежат детали для печати:
+
+1. корпус для ESP32-C3;
+2. держатели сервоприводов;
+3. переходные детали для конструктора «Знаток».
 
 ## UART-протокол
 
