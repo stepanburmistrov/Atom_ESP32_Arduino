@@ -46,7 +46,7 @@ const int LEFT_PWM_PIN  = 6;
 const int RIGHT_DIR_PIN = 8;
 const int RIGHT_PWM_PIN = 9;
 
-int motorSpeed = 120;
+int motorSpeed = 160;
 
 // =====================
 // СЕРВЫ
@@ -349,7 +349,7 @@ void setLeftMotor(int speed) {
   } 
   else if (speed < 0) {
     digitalWrite(LEFT_DIR_PIN, HIGH);
-    analogWrite(LEFT_PWM_PIN, -speed);
+    analogWrite(LEFT_PWM_PIN, 255+speed);
   } 
   else {
     digitalWrite(LEFT_DIR_PIN, LOW);
@@ -366,7 +366,7 @@ void setRightMotor(int speed) {
   } 
   else if (speed < 0) {
     digitalWrite(RIGHT_DIR_PIN, HIGH);
-    analogWrite(RIGHT_PWM_PIN, -speed);
+    analogWrite(RIGHT_PWM_PIN, 255+speed);
   } 
   else {
     digitalWrite(RIGHT_DIR_PIN, LOW);
